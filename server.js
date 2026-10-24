@@ -425,7 +425,7 @@ const server = http.createServer((request, response) => {
   serveStatic(requestUrl, response);
 });
 
-server.listen(PORT, "127.0.0.1", () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log("Open Source Contribution Finder running at http://localhost:" + PORT);
   console.log(githubToken ? "GitHub API token detected on server." : "Using public GitHub API access.");
 });

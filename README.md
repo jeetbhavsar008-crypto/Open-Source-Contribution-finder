@@ -25,6 +25,12 @@ Then open http://localhost:3000.
 
 The backend uses Node's built-in HTTP server and Fetch API, so no package installation is required.
 
+## Deploy for a public link
+
+This project includes a Render Blueprint in `render.yaml`. To publish it, sign in to Render, choose **New > Blueprint**, connect your GitHub fork, and select its `main` branch. Render will create the Node web service and provide a public `onrender.com` URL. The free service can sleep when idle, so its first request after a pause may take longer.
+
+The hosted server reads Render's `PORT` environment variable and listens on `0.0.0.0`, as required for public web-service traffic.
+
 ### Optional GitHub API token
 
 Public issue search works without authentication, but GitHub applies stricter limits to unauthenticated and search requests. To use a token locally, set it in the server environment before starting:
