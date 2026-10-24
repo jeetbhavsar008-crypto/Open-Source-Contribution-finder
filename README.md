@@ -70,3 +70,7 @@ GitHub data cannot guarantee that an issue is still available. A person may have
 ## Hacktoberfest
 
 This is an independent issue-discovery tool. It is not an official Hacktoberfest service and cannot guarantee that a project or issue qualifies for any event rules.
+
+## Project presentation
+
+See [`Patchwork_Project_Pitch_Expanded.pptx`](presentations/Patchwork_Project_Pitch_Expanded.pptx) for the project overview, user flow, matching approach, and implementation details.
