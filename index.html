@@ -131,7 +131,7 @@ async function findIssues(){
         '<div class="ai" id="ai-' + n + '" hidden></div></div>';
     }).join("");
   } catch (e) {
-    const msg = e.message.startsWith("GitHub") ? e.message : "Could not reach GitHub. Check your internet connection.";
+    const msg = e.message.startsWith("GitHub") ? e.message : "Could not reach GitHub. Check your internet connection. (Technical detail: " + e.name + ": " + e.message + ")";
     out.innerHTML = '<div class="msg err">' + esc(msg) + '</div>';
   } finally {
     btn.disabled = false;
@@ -275,7 +275,4 @@ document.getElementById("kw").addEventListener("keydown", e => { if (e.key === "
 detectModel();
 </script>
 </body>
-</html>     
-
-
-
+</html>
