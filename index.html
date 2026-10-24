@@ -93,7 +93,7 @@ async function detectModel(){
 }
 
 function ghHeaders(){
-  const h = ghHeaders();
+  const h = {"Accept": "application/vnd.github+json"};
   const t = document.getElementById("tok").value.trim();
   if (t) h["Authorization"] = "Bearer " + t;
   return h;
@@ -180,7 +180,7 @@ async function health(n, button){
   button.disabled = true;
   box.textContent = "Checking " + repo + "...";
   try {
-    const h = {"Accept": "application/vnd.github+json"};
+    const h = ghHeaders();
     const base = "https://api.github.com/repos/" + repo;
     const rs = await Promise.all([
       fetch(base, {headers: h}),
@@ -275,6 +275,4 @@ document.getElementById("kw").addEventListener("keydown", e => { if (e.key === "
 detectModel();
 </script>
 </body>
-</html>   
-
-
+</html>
