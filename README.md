@@ -29,6 +29,10 @@ The backend uses Node's built-in HTTP server and Fetch API, so no package instal
 
 This project includes a Render Blueprint in `render.yaml`. To publish it, sign in to Render, choose **New > Blueprint**, connect your GitHub fork, and select its `main` branch. Render will create the Node web service and provide a public `onrender.com` URL. The free service can sleep when idle, so its first request after a pause may take longer.
 
+### Publish the static site with GitHub Pages
+
+The `public/` folder can also run without a Node server. The included GitHub Actions workflow publishes it when changes are pushed to `main`. On GitHub, open the repository's **Settings > Pages**, select **GitHub Actions** as the build and deployment source, and push the project to your fork. After the workflow finishes, GitHub Pages shows the public website URL in that same settings page. In this mode the browser searches GitHub's public API directly, so requests can be rate-limited and issue comments should be checked manually.
+
 The hosted server reads Render's `PORT` environment variable and listens on `0.0.0.0`, as required for public web-service traffic.
 
 ### Optional GitHub API token

@@ -13,6 +13,7 @@ const savedKey = "patchwork.savedIssues.v1";
 
 let currentIssues = [];
 let isSavedView = false;
+let browserSearchCache = new Map();
 
 function escapeHtml(value) {
   return String(value == null ? "" : value)
@@ -175,6 +176,156 @@ function showLoading() {
   ].join("");
 }
 
+function publicSearchQuery(filters, label) {
+  const freshDays = Number(filters.get("freshDays")) || 90;
+  const cutoff = new Date(Date.now() - freshDays * 86400000).toISOString().slice(0, 10);
+  const parts = ["is:issue", "is:open", "no:assignee", "updated:>=" + cutoff];
+  const language = filters.get("language");
+  if (language) parts.push("language:" + language);
+  parts.push(label);
+  return parts.join(" ");
+}
+
+function cleanIssueBody(value) {
+  return String(value || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[\u0060*_>#~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function issueFromPublicApi(issue, skills) {
+  const labels = Array.isArray(issue.labels) ? issue.labels : [];
+  const labelNames = labels.map((label) => String(label.name || "").toLowerCase());
+  const beginner = labelNames.some((name) => [
+    "good first issue", "good-first-issue", "beginner", "beginner-friendly", "first-timers-only", "first timers only", "easy"
+  ].includes(name));
+  const helpWanted = labelNames.includes("help wanted") || labelNames.includes("help-wanted");
+  const issueText = [issue.title || "", issue.body || "", labelNames.join(" ")].join(" ").toLowerCase();
+  const skillMatches = skills.filter((skill) => issueText.includes(skill));
+  const updatedAt = issue.updated_at || issue.created_at || "";
+  const updatedTime = Date.parse(updatedAt);
+  const ageDays = Number.isFinite(updatedTime) ? Math.max(0, Math.floor((Date.now() - updatedTime) / 86400000)) : null;
+  const body = String(issue.body || "");
+  const reasons = [];
+  let score = 48;
+
+  if (beginner) {
+    reasons.push("Beginner-friendly label");
+    score += 22;
+  } else if (helpWanted) {
+    reasons.push("Maintainer marked it help wanted");
+    score += 12;
+  }
+  if (skillMatches.length) {
+    reasons.push("Mentions " + skillMatches.slice(0, 3).join(", "));
+    score += Math.min(18, skillMatches.length * 7);
+  }
+  if (ageDays !== null && ageDays <= 14) {
+    reasons.push("Updated in the last 2 weeks");
+    score += 9;
+  } else if (ageDays !== null && ageDays <= 60) {
+    reasons.push("Recently updated");
+    score += 5;
+  }
+  if (body.trim().length >= 180) {
+    reasons.push("Includes task context");
+    score += 6;
+  }
+
+  const comments = Number(issue.comments || 0);
+  return {
+    id: issue.id,
+    number: issue.number,
+    title: issue.title || "Untitled issue",
+    url: issue.html_url,
+    repo: String(issue.repository_url || "").replace("https://api.github.com/repos/", ""),
+    author: issue.user && issue.user.login ? issue.user.login : "GitHub contributor",
+    avatar: issue.user && issue.user.avatar_url ? issue.user.avatar_url : "",
+    bodyPreview: cleanIssueBody(body).slice(0, 230) || "The maintainer has not added a description yet.",
+    labels: labels.map((label) => ({
+      name: label.name || "",
+      color: /^[0-9a-f]{6}$/i.test(label.color || "") ? label.color : "8fa69a"
+    })),
+    comments,
+    createdAt: issue.created_at,
+    updatedAt,
+    ageDays,
+    beginner,
+    helpWanted,
+    skillMatches,
+    score: Math.min(99, score),
+    reasons,
+    claimCheck: comments === 0 ? "checked" : "needs-check",
+    assignees: Array.isArray(issue.assignees) ? issue.assignees.length : (issue.assignee ? 1 : 0)
+  };
+}
+
+async function searchGitHubDirectly(filters) {
+  const freshDays = Number(filters.get("freshDays")) || 90;
+  const level = filters.get("level") || "beginner";
+  const skills = (filters.get("skills") || "")
+    .split(",").map((skill) => skill.trim().toLowerCase()).filter((skill) => skill.length > 1).slice(0, 8);
+  const limit = Math.min(40, Math.max(5, Number(filters.get("limit")) || 24));
+  const labels = level === "intermediate"
+    ? ['label:"help wanted"']
+    : level === "any"
+      ? ['label:"good first issue"', 'label:"help wanted"']
+      : ['label:"good first issue"', "label:good-first-issue"];
+  const queries = labels.map((label) => publicSearchQuery(filters, label));
+  const cacheKey = JSON.stringify({ queries, limit, skills });
+  const cached = browserSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.payload;
+
+  const batches = await Promise.all(queries.map(async (query) => {
+    const url = new URL("https://api.github.com/search/issues");
+    url.searchParams.set("q", query);
+    url.searchParams.set("sort", "updated");
+    url.searchParams.set("order", "desc");
+    url.searchParams.set("per_page", "40");
+    const response = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 429) {
+        throw new Error("GitHub is limiting public searches right now. Please wait a minute and try again.");
+      }
+      throw new Error(payload.message || "GitHub could not return issues right now.");
+    }
+    return Array.isArray(payload.items) ? payload.items : [];
+  }));
+
+  const ignoredLabels = new Set(["wontfix", "won't fix", "duplicate", "invalid", "stale"]);
+  const claimPattern = /\b(i am|i'm|i will|i'll|i can|let me)\s+(?:take|work on|pick up|claim|handle)\s+(?:this|it|issue)\b|\b(?:i am|i'm)\s+(?:currently\s+)?working on\s+(?:this|it|issue)\b|\bassigned to @?[a-z0-9-]+\b|\bi have claimed\b/i;
+  const unique = new Map();
+  for (const issue of batches.flat()) {
+    if (!issue || issue.pull_request || issue.state !== "open") continue;
+    const assignees = Array.isArray(issue.assignees) ? issue.assignees.length : (issue.assignee ? 1 : 0);
+    const labelsForIssue = Array.isArray(issue.labels) ? issue.labels.map((label) => String(label.name || "").toLowerCase()) : [];
+    if (assignees || labelsForIssue.some((label) => ignoredLabels.has(label)) || claimPattern.test(issue.body || "")) continue;
+    unique.set(issue.id, issue);
+  }
+
+  const candidates = Array.from(unique.values())
+    .map((issue) => issueFromPublicApi(issue, skills))
+    .filter((issue) => issue.ageDays === null || issue.ageDays <= freshDays)
+    .sort((left, right) => right.score - left.score || (left.ageDays || 0) - (right.ageDays || 0))
+    .slice(0, limit);
+  const result = {
+    issues: candidates,
+    meta: {
+      total: candidates.length,
+      hiddenClaimed: 0,
+      checkedForClaims: 0,
+      publicApi: true,
+      message: "Searches use GitHub's public API. Issues with comments still need a final check on GitHub before starting."
+    }
+  };
+  browserSearchCache.set(cacheKey, { payload: result, expiresAt: Date.now() + 5 * 60 * 1000 });
+  return result;
+}
+
 async function loadIssues() {
   isSavedView = false;
   updateSavedToggle();
@@ -184,18 +335,22 @@ async function loadIssues() {
   showLoading();
   resultCount.textContent = "";
   try {
-    if (window.location.protocol === "file:") {
-      renderEmpty(
-        "Start Patchwork to see issues",
-        "This page is open directly from a file. Run npm start in the project folder, then visit localhost:3000 to load GitHub issues."
-      );
-      return;
+    const filters = currentFilters();
+    let payload;
+    if (window.location.protocol === "file:" || window.location.hostname.endsWith(".github.io")) {
+      payload = await searchGitHubDirectly(filters);
+    } else {
+      try {
+        const response = await fetch("/api/issues?" + filters.toString(), {
+          headers: { Accept: "application/json" }
+        });
+        const serverPayload = await response.json();
+        if (!response.ok) throw new Error(serverPayload.error || "Could not load issues.");
+        payload = serverPayload;
+      } catch (_serverError) {
+        payload = await searchGitHubDirectly(filters);
+      }
     }
-    const response = await fetch("/api/issues?" + currentFilters().toString(), {
-      headers: { Accept: "application/json" }
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Could not load issues.");
     currentIssues = Array.isArray(payload.issues) ? payload.issues : [];
     drawResults();
     if (payload.meta && payload.meta.hiddenClaimed > 0) {
