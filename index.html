@@ -27,6 +27,11 @@ button:disabled{opacity:.6;cursor:wait}
 .status{font-size:.9rem;color:var(--muted);margin:-12px 0 20px}
 .status b{color:var(--accent)}
 .explain{margin-top:10px;background:transparent;color:var(--accent);border-color:var(--accent);padding:6px 12px;font-size:.9rem}
+.health{margin-top:10px;margin-left:8px;background:transparent;color:var(--text);border-color:var(--line);padding:6px 12px;font-size:.9rem}
+.hbox{margin-top:10px;padding:12px;border:1px solid var(--line);border-radius:6px;font-size:.95rem}
+.score{font-size:1.2rem;font-weight:bold;margin-bottom:6px}
+.ok{color:var(--accent)}.bad{color:#cf222e}
+.verdict{margin-top:8px;font-style:italic}
 .ai{margin-top:10px;padding:12px;border-left:3px solid var(--accent);background:var(--bg);white-space:pre-wrap;font-size:.95rem}
 </style>
 </head>
@@ -50,6 +55,7 @@ button:disabled{opacity:.6;cursor:wait}
     <button id="go">Find issues</button>
   </div>
 
+  <div class="status"><label>GitHub token (optional, raises the request limit): <input id="tok" type="password" placeholder="paste token here" style="width:260px;padding:6px 8px"></label></div>
   <div class="status" id="status">Checking for Ollama...</div>
 
   <div id="out"><div class="msg">Choose a language and press "Find issues".</div></div>
@@ -86,6 +92,13 @@ async function detectModel(){
   }
 }
 
+function ghHeaders(){
+  const h = ghHeaders();
+  const t = document.getElementById("tok").value.trim();
+  if (t) h["Authorization"] = "Bearer " + t;
+  return h;
+}
+
 async function findIssues(){
   const lang = document.getElementById("lang").value;
   const kw = document.getElementById("kw").value.trim();
@@ -98,7 +111,7 @@ async function findIssues(){
   btn.disabled = true;
   out.innerHTML = '<div class="msg">Loading issues...</div>';
   try {
-    const res = await fetch(url, {headers: {"Accept": "application/vnd.github+json"}});
+    const res = await fetch(url, {headers: ghHeaders()});
     if (res.status === 403 || res.status === 429) throw new Error("GitHub rate limit reached. Wait one minute and try again.");
     if (!res.ok) throw new Error("GitHub returned an error (" + res.status + "). Try again.");
     const data = await res.json();
@@ -113,6 +126,8 @@ async function findIssues(){
         '<a class="title" href="' + esc(i.html_url) + '" target="_blank" rel="noopener">' + esc(i.title) + '</a>' +
         '<div class="meta">' + esc(repo) + ' &middot; updated ' + ago(i.updated_at) + ' &middot; ' + i.comments + ' comments</div>' +
         '<button class="explain" data-n="' + n + '">Explain this issue</button>' +
+        '<button class="health" data-n="' + n + '">Check repo health</button>' +
+        '<div class="hbox" id="h-' + n + '" hidden></div>' +
         '<div class="ai" id="ai-' + n + '" hidden></div></div>';
     }).join("");
   } catch (e) {
@@ -158,9 +173,102 @@ async function explain(n, button){
   }
 }
 
+async function health(n, button){
+  const box = document.getElementById("h-" + n);
+  box.hidden = false;
+  const repo = items[n].repository_url.split("/repos/")[1];
+  button.disabled = true;
+  box.textContent = "Checking " + repo + "...";
+  try {
+    const h = {"Accept": "application/vnd.github+json"};
+    const base = "https://api.github.com/repos/" + repo;
+    const rs = await Promise.all([
+      fetch(base, {headers: h}),
+      fetch(base + "/community/profile", {headers: h}),
+      fetch(base + "/pulls?state=closed&per_page=20", {headers: h})
+    ]);
+    const lim = rs.find(r => r.status === 403 || r.status === 429);
+    if (lim && lim.headers.get("x-ratelimit-remaining") !== "0") {
+      let detail = "";
+      try { detail = (await lim.json()).message || ""; } catch (x) { detail = "reply was not from GitHub, possibly a network filter"; }
+      throw new Error("blocked:" + lim.status + " " + detail + " [" + lim.url.replace("https://api.github.com", "") + "]");
+    }
+    if (lim) {
+      const rst = lim.headers.get("x-ratelimit-reset");
+      const mins = rst ? Math.max(1, Math.ceil((rst * 1000 - Date.now()) / 60000)) : "";
+      throw new Error("rate:" + mins);
+    }
+    if (!rs[0].ok) throw new Error("fail");
+    const info = await rs[0].json();
+    const comm = rs[1].ok ? await rs[1].json() : {};
+    const prs = rs[2].ok ? await rs[2].json() : [];
+    const files = comm.files || {};
+
+    const days = Math.floor((Date.now() - new Date(info.pushed_at)) / 86400000);
+    const merged = prs.filter(p => p.merged_at).length;
+    const rate = prs.length ? merged / prs.length : null;
+
+    let score = 0;
+    const checks = [];
+    const add = (ok, pts, label) => { if (ok) score += pts; checks.push([ok, label]); };
+    score += days <= 90 ? 3 : (days <= 365 ? 1 : 0);
+    checks.push([days <= 90, "Last activity " + ago(info.pushed_at)]);
+    add(!!files.contributing, 2, files.contributing ? "Has a contributing guide" : "No contributing guide");
+    add(!!(info.license || files.license), 1, (info.license || files.license) ? "Has a license" : "No license");
+    add(!!files.code_of_conduct, 1, files.code_of_conduct ? "Has a code of conduct" : "No code of conduct");
+    if (rate === null) {
+      checks.push([false, "No closed pull requests to judge"]);
+    } else {
+      score += rate >= 0.5 ? 3 : (rate >= 0.25 ? 1 : 0);
+      checks.push([rate >= 0.5, merged + " of last " + prs.length + " closed pull requests were merged"]);
+    }
+
+    let verdict = score >= 8 ? "Active and welcoming project. A good place to start."
+                : score >= 5 ? "Decent project, but check the issue comments before you start."
+                : "Risky for a first contribution. It may be inactive or slow to review.";
+
+    box.innerHTML = '<div class="score">Beginner-friendliness: ' + score + '/10</div>' +
+      checks.map(c => '<div class="' + (c[0] ? "ok" : "bad") + '">' + (c[0] ? "&#10003; " : "&#10007; ") + esc(c[1]) + '</div>').join("") +
+      '<div class="verdict" id="v-' + n + '">' + verdict + '</div>';
+
+    // Let Gemma write a friendlier one-line verdict, if it is running
+    if (model) {
+      const facts = checks.map(c => (c[0] ? "YES: " : "NO: ") + c[1]).join("; ");
+      try {
+        const res = await fetch(OLLAMA + "/api/chat", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            model: model, stream: false,
+            messages: [
+              {role: "system", content: "You advise first-time open source contributors. Reply with ONE short sentence (max 25 words) saying whether this repository is a good place to start and why. Use only the facts given."},
+              {role: "user", content: "Repository: " + repo + ". Score " + score + "/10. Facts: " + facts}
+            ]
+          })
+        });
+        if (res.ok) {
+          const d = await res.json();
+          const t = d.message.content.trim();
+          if (t) document.getElementById("v-" + n).textContent = t;
+        }
+      } catch (e) { /* keep the rule-based verdict */ }
+    }
+  } catch (e) {
+    box.textContent = e.message.startsWith("rate")
+      ? "GitHub rate limit reached. " + (e.message.slice(5) ? "It resets in about " + e.message.slice(5) + " minute(s). " : "") + "Or paste a free GitHub token in the box above to raise the limit."
+      : e.message.startsWith("blocked:")
+      ? "GitHub refused this request (" + e.message.slice(8) + "). This is not a rate limit."
+      : "Could not check this repo. Try again in a moment.";
+  } finally {
+    button.disabled = false;
+  }
+}
+
 out.addEventListener("click", e => {
   const b = e.target.closest(".explain");
   if (b) explain(Number(b.dataset.n), b);
+  const h = e.target.closest(".health");
+  if (h) health(Number(h.dataset.n), h);
 });
 btn.addEventListener("click", findIssues);
 document.getElementById("kw").addEventListener("keydown", e => { if (e.key === "Enter") findIssues(); });
@@ -168,6 +276,3 @@ detectModel();
 </script>
 </body>
 </html>
-
-
-
